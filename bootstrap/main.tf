@@ -1,5 +1,5 @@
 locals {
-    common.tags = {
+    common_tags = {
         Project = "terraform-aws-ecs-fargate"
         MangedBy= "Terraform"
     }
