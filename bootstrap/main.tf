@@ -13,7 +13,7 @@ resource "aws_s3_bucket" "state" {
   bucket        = "terraform-ecs-fargate-state-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
 
-  tags = local.common.tags
+  tags = local.common_tags
 
 }
 
@@ -37,9 +37,9 @@ resource "aws_dynamodb_table" "lock" {
   hash_key     = "LockID"
 
   attribute {
-    name = LockID
+    name = "LockID"
     type = "S"
   }
 
-  tags = local.common.tags
+  tags = local.common_tags
 }
