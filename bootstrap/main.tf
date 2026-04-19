@@ -1,7 +1,7 @@
 locals {
   common_tags = {
-    Project  = "terraform-aws-ecs-fargate"
-    MangedBy = "Terraform"
+    Project   = "terraform-aws-ecs-fargate"
+    ManagedBy = "Terraform"
   }
 }
 
@@ -10,7 +10,7 @@ state bucket will store terraform.tfstate file remotely instead of
 in local machine, so a team can work on it
 */
 resource "aws_s3_bucket" "state" {
-  bucket        = "terraform-ecs-fargate-state-${data.aws_caller_identity.current.account_id}"
+  bucket        = "terraform-ecs-fargate-state"
   force_destroy = true
 
   tags = local.common_tags
