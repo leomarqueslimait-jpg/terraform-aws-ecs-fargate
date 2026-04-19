@@ -6,11 +6,11 @@ locals {
   }
 }
 resource "aws_vpc" "this" {
-  
-  cidr_block = var.vpc_cidr
+
+  cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
-  enable_dns_support = true
-  tags       = merge(local.common_tags, { Name = "${var.name}-vpc-main" })
+  enable_dns_support   = true
+  tags                 = merge(local.common_tags, { Name = "${var.name}-vpc-main" })
 }
 
 resource "aws_internet_gateway" "this" {
