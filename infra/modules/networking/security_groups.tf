@@ -4,7 +4,7 @@ resource "aws_security_group" "alb" {
   vpc_id      = aws_vpc.this.id
 
 
-  tags = merge(local.common_tags, { Name = "${var.name}-alb-sg" })
+  tags = merge(var.tags, { Name = "${var.name}-alb-sg" }, {Environment = "Modules/Networking"})
 }
 
 resource "aws_security_group" "ecs" {
@@ -13,7 +13,7 @@ resource "aws_security_group" "ecs" {
   vpc_id = aws_vpc.this.id
 
   
-  tags = merge(local.common_tags, { Name = "${var.name}-ecs-sg" })
+  tags = merge(var.tags, { Name = "${var.name}-ecs-sg" }, {Environment = "Modules/Networking"})
 
 }
 
@@ -22,7 +22,7 @@ resource "aws_security_group" "rds" {
   name   = "rds_sg"
   vpc_id = aws_vpc.this.id
 
-  tags = merge(local.common_tags, { Name = "${var.name}-rds-sg" })
+  tags = merge(var.tags, { Name = "${var.name}-rds-sg" }, {Environment = "Modules/Networking"})
 
 }
 

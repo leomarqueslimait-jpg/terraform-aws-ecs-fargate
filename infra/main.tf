@@ -1,3 +1,11 @@
+locals {
+    common_tags = {
+        Project = "terraform-aws-ecs-fargate"
+        ManagedBy = "Terraform"
+      
+    }
+}
+
 module "networking" {
     source = "./modules/networking"
 
@@ -8,5 +16,12 @@ module "networking" {
     isolated_subnets_cidr = ["10.1.32.0/24", "10.1.33.0/24"]#10.1.32.0/24 - 10.1.47.0/24
     #spare subnet block = 10.1.48.0/24 + (for future tiers)
     azs = ["us-east-1a", "us-east-1b"]
+    tags = local.common_tags
 }
 
+module "ecr" {
+  source = "./modules/ecr"
+
+  name = "ecs-fargate-app"
+  tags = local.common_tags
+}

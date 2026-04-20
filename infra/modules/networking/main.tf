@@ -1,22 +1,15 @@
-locals {
-  common_tags = {
-    Project     = "terraform-aws-ecs-fargate"
-    ManagedBy   = "Terraform"
-    Environment = "Modules/Networking"
-  }
-}
 resource "aws_vpc" "this" {
 
   cidr_block           = var.vpc_cidr
   enable_dns_hostnames = true
   enable_dns_support   = true
-  tags                 = merge(local.common_tags, { Name = "${var.name}-vpc-main" })
+  tags                 = merge(var.tags, { Name = "${var.name}-vpc-main" }, {Environment = "Modules/Networking"})
 }
 
 resource "aws_internet_gateway" "this" {
   vpc_id = aws_vpc.this.id
 
-  tags = merge(local.common_tags, { Name = "${var.name}-igw" })
+  tags = merge(var.tags, { Name = "${var.name}-igw" }, {Environment = "Modules/Networking"})
 }
 
 
@@ -25,13 +18,13 @@ resource "aws_nat_gateway" "this" {
   allocation_id = aws_eip.nat.id
   depends_on    = [aws_internet_gateway.this]
 
-  tags = merge(local.common_tags, { Name = "${var.name}-nat" })
+  tags = merge(var.tags, { Name = "${var.name}-nat" }, {Environment = "Modules/Networking"})
 }
 
 resource "aws_eip" "nat" {
   domain = "vpc"
 
-  tags = merge(local.common_tags, { Name = "${var.name}-eip" })
+  tags = merge(var.tags, { Name = "${var.name}-eip" }, {Environment = "Modules/Networking"})
 }
 
 
@@ -42,7 +35,7 @@ resource "aws_subnet" "private" {
   cidr_block        = var.private_subnets_cidr[count.index]
   availability_zone = var.azs[count.index]
 
-  tags = merge(local.common_tags, { Name = "${var.name}-private-${count.index + 1}" })
+  tags = merge(var.tags, { Name = "${var.name}-private-${count.index + 1}" }, {Environment = "Modules/Networking"})
 
 }
 
@@ -54,7 +47,7 @@ resource "aws_route_table" "private_rt" {
     nat_gateway_id = aws_nat_gateway.this.id
   }
 
-  tags = merge(local.common_tags, { Name = "${var.name}-private_rt" })
+  tags = merge(var.tags, { Name = "${var.name}-private_rt" }, {Environment = "Modules/Networking"})
 }
 
 
@@ -73,7 +66,7 @@ resource "aws_subnet" "public" {
   availability_zone       = var.azs[count.index]
   map_public_ip_on_launch = true
 
-  tags = merge(local.common_tags, { Name = "${var.name}-public-${count.index + 1}" })
+  tags = merge(var.tags, { Name = "${var.name}-public-${count.index + 1}" }, {Environment = "Modules/Networking"})
 }
 
 resource "aws_route_table" "public_rt" {
@@ -85,7 +78,7 @@ resource "aws_route_table" "public_rt" {
 
   }
 
-  tags = merge(local.common_tags, { Name = "${var.name}-public_rt" })
+  tags = merge(var.tags, { Name = "${var.name}-public_rt" }, {Environment = "Modules/Networking"})
 }
 
 resource "aws_route_table_association" "public_rt" {
@@ -101,14 +94,14 @@ resource "aws_subnet" "isolated" {
   cidr_block        = var.isolated_subnets_cidr[count.index]
   availability_zone = var.azs[count.index]
 
-  tags = merge(local.common_tags, { Name = "${var.name}-isolated-${count.index + 1}" })
+  tags = merge(var.tags, { Name = "${var.name}-isolated-${count.index + 1}" }, {Environment = "Modules/Networking"})
 
 }
 
 resource "aws_route_table" "isolated" {
   vpc_id = aws_vpc.this.id
 
-  tags = merge(local.common_tags, { Name = "${var.name}-isolated_rt" })
+  tags = merge(var.tags, { Name = "${var.name}-isolated_rt" }, {Environment = "Modules/Networking"})
 
 }
 
