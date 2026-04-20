@@ -25,3 +25,10 @@ module "ecr" {
   name = "ecs-fargate-app"
   tags = local.common_tags
 }
+
+module "secrets" {
+  source = "./modules/secrets"
+
+  name = "ecs-fargate-db-password"
+  tags = local.common_tags
+}
