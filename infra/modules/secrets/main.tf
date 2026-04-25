@@ -1,17 +1,19 @@
 resource "random_password" "db" {
-  length = 16
-  special = true
+  length           = 16
+  special          = true
+  override_special = "!#$%&*()-_=+[]{}?"
 }
 
 resource "aws_secretsmanager_secret_version" "db" {
-  secret_id = aws_secretsmanager_secret.db.id
+  secret_id     = aws_secretsmanager_secret.db.id
   secret_string = random_password.db.result
 
 }
 
 resource "aws_secretsmanager_secret" "db" {
   description = "Databse password container"
-  name = var.name
-  tags = merge(var.tags, { Name = "db_password"})
+  name        = var.name
+  recovery_window_in_days = var.recovery_window_in_days
+  tags        = merge(var.tags, { Name = "db_password" })
 
 }

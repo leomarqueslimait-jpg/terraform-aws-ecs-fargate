@@ -12,10 +12,21 @@ def home():
 def health():
     return jsonify({"status": "healthy"}), 200
 
+@app.route("/stress")                                    # ← add here
+def stress():
+    result = sum(i * i for i in range(1000000))
+    return jsonify({"result": result, "status": "done"})
+
 @app.route("/db")
 def db():
     try:
-        conn = psycopg2.connect(os.environ["DATABASE_URL"])
+        conn = psycopg2.connect(
+            host=os.environ["DB_HOST"],
+            dbname=os.environ["DB_NAME"],
+            user=os.environ["DB_USER"],
+            port=os.environ["DB_PORT"],
+            password=os.environ["DB_PASSWORD"]
+        )
         conn.close()
         return jsonify({"status": "database connected"})
     except Exception as e:

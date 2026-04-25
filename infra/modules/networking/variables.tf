@@ -32,6 +32,6 @@ variable "azs" {
 
 variable "tags" {
   description = "Tags"
-  type = map(string)
-  default = {}
+  type        = map(string)
+  default     = {}
 }
