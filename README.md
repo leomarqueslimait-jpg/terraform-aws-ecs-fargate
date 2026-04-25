@@ -1,6 +1,10 @@
-# terraform-aws-ecs-fargate
+# Three-Tier Application on ECS Fargate with RDS PostgreSQL
 
-A production-pattern three-tier containerized application on AWS using ECS Fargate, RDS PostgreSQL Multi-AZ, and an Application Load Balancer — fully provisioned with Terraform.
+## Overview
+
+This project deploys a production-pattern three-tier containerized application on AWS using ECS Fargate, RDS PostgreSQL Multi-AZ, and an Application Load Balancer — all provisioned with Terraform. The goal is to demonstrate a real-world container deployment architecture that separates concerns across three isolated network tiers, handles secrets securely, scales automatically under load, and can be torn down and rebuilt entirely from code.
+
+The application itself is intentionally simple — a Python Flask API with four endpoints. The value of this project is not the application but the infrastructure pattern around it: how the network is designed, how secrets flow from generation to consumption without ever being hardcoded, how the load balancer distributes traffic across containers that register and deregister themselves automatically, and how the database is protected behind isolated subnets with no internet access at all.
 
 ---
 
@@ -43,252 +47,223 @@ Internet
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Subnet Design
+---
 
-The VPC (`10.1.0.0/16`) is divided into three tiers. Each tier reserves an `/21` block giving 8 available `/24` subnets per tier for future growth without address space conflicts:
+## Project Structure
 
 ```
-Public   10.1.0.0/21  → 10.1.1.0/24, 10.1.2.0/24    (ALB)
-Private  10.1.8.0/21  → 10.1.16.0/24, 10.1.17.0/24  (ECS)
-Isolated 10.1.16.0/21 → 10.1.32.0/24, 10.1.33.0/24  (RDS)
-Spare    10.1.48.0/21+                                 (future tiers)
+terraform-aws-ecs-fargate/
+├── app/                          # Flask application and Dockerfile
+│   ├── app.py
+│   ├── requirements.txt
+│   └── Dockerfile
+├── bootstrap/                    # Remote state infrastructure — deployed once, manually
+│   ├── main.tf
+│   ├── providers.tf
+│   └── outputs.tf
+├── infra/
+│   ├── modules/
+│   │   ├── networking/           # VPC, subnets, IGW, NAT, route tables, security groups
+│   │   ├── ecr/                  # Container registry + automated image push
+│   │   ├── secrets/              # Password generation + Secrets Manager
+│   │   ├── rds/                  # PostgreSQL Multi-AZ database
+│   │   ├── alb/                  # Load balancer, target group, listener, S3 logs
+│   │   └── ecs/                  # Cluster, task definition, service, IAM, auto scaling
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   └── providers.tf
+└── README.md
 ```
 
 ---
 
-## Modules
+## Network Design
 
-### bootstrap/
-Creates the remote state infrastructure. Must be deployed before `infra/`.
+The network was designed with scalability and security isolation as the primary goals. The VPC uses `10.1.0.0/16` which gives 65,536 addresses across 256 possible `/24` subnets. Rather than carving it up arbitrarily, I reserved a `/21` block per tier — giving each tier 8 available `/24` subnets for future growth. Only 2 subnets per tier are used today, but the address space is already allocated and won't conflict if more are added later.
 
-| Resource | Purpose |
-|----------|---------|
-| `aws_s3_bucket` | Stores Terraform state remotely |
-| `aws_s3_bucket_versioning` | Protects state history — allows rollback |
-| `aws_s3_bucket_server_side_encryption_configuration` | Encrypts state at rest |
-| `aws_dynamodb_table` | State locking — prevents simultaneous applies |
+```
+Public   10.1.0.0/21  → using 10.1.1.0/24, 10.1.2.0/24    (ALB)
+Private  10.1.8.0/21  → using 10.1.16.0/24, 10.1.17.0/24  (ECS)
+Isolated 10.1.16.0/21 → using 10.1.32.0/24, 10.1.33.0/24  (RDS)
+Spare    10.1.48.0/21+                                       (future tiers)
+```
+
+The three tiers have very different levels of internet access by design. Public subnets have a route to the Internet Gateway, meaning resources there can receive inbound traffic from the internet — this is where the ALB lives. Private subnets have a route to the NAT Gateway, meaning resources there can initiate outbound connections but cannot receive inbound connections from the internet — this is where ECS tasks live, because they need to pull Docker images from ECR but should never be directly reachable. Isolated subnets have no routes to the internet at all — this is where RDS lives, because a database has no business initiating or receiving any internet connection.
+
+![VPC Details](printscreens/vpc_details.png)
+
+The VPC resource map shows the complete network topology — 6 subnets across 2 availability zones, 4 route tables, and 2 network connections:
+
+![VPC Resource Map](printscreens/vpc_map.png)
+
+### Route Tables
+
+Three separate route tables enforce the isolation between tiers. The isolated route table deliberately has no routes, which is what makes the database truly unreachable from the internet regardless of any other configuration:
+
+![Route Tables](printscreens/vpc_route_tables.png)
+
+### Internet Gateway
+
+The Internet Gateway is attached to the VPC and referenced by the public route table. It is what gives the ALB its ability to receive traffic from the public internet:
+
+![Internet Gateway](printscreens/igw.png)
+
+### NAT Gateway
+
+The NAT Gateway sits in the public subnet with an Elastic IP. Private subnets route outbound traffic through it. This allows ECS tasks to reach ECR to pull their Docker images without having a public IP themselves — the privacy is preserved because only outbound connections initiated from inside are allowed:
+
+![NAT Gateway](printscreens/nat.png)
 
 ---
 
-### modules/networking/
+## Security Groups
 
-**VPC and Subnets**
+Security groups in this project use a pattern called **security group chaining**. Instead of specifying CIDR ranges in the rules, the rules reference other security groups as the source or destination. This is more secure because it means only resources explicitly assigned that security group can communicate — not just anything that happens to be in the same subnet.
 
-| Resource | Purpose | Connects To |
-|----------|---------|-------------|
-| `aws_vpc` | Main network boundary, DNS enabled | All subnets |
-| `aws_subnet.public` | 2 AZs, auto-assigns public IPs | ALB, IGW, NAT |
-| `aws_subnet.private` | 2 AZs, no public IPs | ECS tasks |
-| `aws_subnet.isolated` | 2 AZs, no internet route whatsoever | RDS only |
-| `aws_internet_gateway` | Allows public subnets to reach the internet | Public route table |
-| `aws_eip` | Static public IP for NAT Gateway | NAT Gateway |
-| `aws_nat_gateway` | Allows private subnets outbound internet for ECR image pulls | Private route table |
-| `aws_route_table.public_rt` | Routes `0.0.0.0/0` → IGW | Public subnets |
-| `aws_route_table.private_rt` | Routes `0.0.0.0/0` → NAT | Private subnets |
-| `aws_route_table.isolated` | No routes — completely isolated | Isolated subnets |
+The security groups were written as separate `aws_security_group_rule` resources rather than inline ingress/egress blocks. This was necessary to avoid a circular dependency error — the ALB security group needed to reference ECS, ECS needed to reference ALB and RDS, and RDS needed to reference ECS. Terraform couldn't determine which one to create first. Separating the rules from the groups breaks the cycle by creating the empty groups first and attaching rules after.
 
-**Security Groups**
+### ALB Security Group
 
-Security groups are defined as separate `aws_security_group_rule` resources instead of inline blocks. This avoids circular dependency errors since ALB, ECS, and RDS all reference each other's security groups.
+The ALB accepts inbound traffic on ports 80 and 443 from the entire internet. It only sends outbound traffic on port 5000 to the ECS security group:
 
-The pattern used is **security group chaining** — rules reference other security groups instead of CIDRs, meaning only resources explicitly assigned a security group can communicate, not just anything in the same subnet.
+![ALB SG Inbound](printscreens/alb_sg_inbound.png)
 
-| Security Group | Inbound | Outbound |
-|----------------|---------|---------|
-| `alb` | 80, 443 from `0.0.0.0/0` | 5000 to ECS sg |
-| `ecs` | 5000 from ALB sg | 5432 to RDS sg, 443 to `0.0.0.0/0` |
-| `rds` | 5432 from ECS sg | none |
+![ALB SG Outbound](printscreens/alb_sg_outbound.png)
 
-> **Lesson learned:** Writing security groups with inline ingress/egress blocks where resources reference each other causes a cycle error — Terraform can't determine which resource to create first. Separating them into `aws_security_group_rule` resources breaks the cycle by creating empty security groups first and attaching rules after.
+### ECS Security Group
+
+ECS tasks accept inbound traffic on port 5000 from the ALB security group only. They send outbound traffic on port 443 to the internet for ECR image pulls, and on port 5432 to the RDS security group:
+
+![ECS SG Inbound](printscreens/ecs_sg_inbound.png)
+
+![ECS SG Outbound](printscreens/ecs_sg_outbound.png)
+
+### RDS Security Group
+
+The database accepts inbound traffic on port 5432 from the ECS security group only. No outbound rules exist because RDS never initiates connections — it only responds to connections initiated by ECS:
+
+![RDS SG Inbound](printscreens/rds_inbound.png)
 
 ---
 
-### modules/ecr/
+## Application Load Balancer
 
-| Resource | Purpose | Connects To |
-|----------|---------|-------------|
-| `aws_ecr_repository` | Private Docker registry | ECS task definition image |
-| `terraform_data.push_image` | Builds and pushes Docker image automatically during `terraform apply` | Depends on ECR repo |
+The ALB is the only publicly-facing entry point into the application. It lives in both public subnets across two availability zones, meaning if one AZ goes down the ALB continues serving traffic from the other. It has a single listener on port 80 that forwards all traffic to the ECS target group.
 
-The `terraform_data` resource runs three commands locally during apply:
-1. Authenticate Docker to ECR using AWS credentials
-2. Build the Docker image from `app/`
-3. Push the image to ECR
+The target group is where the connection between the ALB and ECS happens. When ECS starts a task, the service automatically registers that task's private IP address and port 5000 into the target group. When a task stops, it is automatically deregistered. The ALB then distributes traffic across all registered healthy tasks using round robin. The target group runs a health check every 35 seconds against the `/health` endpoint — tasks that fail 3 consecutive checks are removed from rotation and ECS replaces them.
 
-`force_delete = true` allows `terraform destroy` to delete the repository even when it contains images.
+The target group uses `target_type = "ip"` rather than the default `instance` because Fargate tasks don't run on EC2 instances. They have no instance ID — they only have a private IP address assigned when the task starts.
 
----
+![ALB Network Mapping](printscreens/loadbalancer_mapping.png)
 
-### modules/secrets/
+![ALB Listeners](printscreens/alb_listeners.png)
 
-| Resource | Purpose | Connects To |
-|----------|---------|-------------|
-| `random_password` | Generates a 16-char cryptographically secure password | Secret version, RDS module |
-| `aws_secretsmanager_secret` | Creates the secret container | Secret version |
-| `aws_secretsmanager_secret_version` | Stores the password value | ECS (via ARN at runtime) |
+![ALB Security](printscreens/alb_security.png)
 
-The password uses `override_special = "!#$%&*()-_=+[]{}?"` to exclude characters RDS doesn't accept (`/`, `@`, `"`, space).
+The ALB monitoring tab shows the request count and response time spike during the load test, proving traffic is flowing through the load balancer and reaching the ECS tasks:
 
-**How the secret is consumed:**
-- **RDS** — receives the password directly as a module output (`db_password`) at apply time
-- **ECS** — receives only the secret ARN and AWS injects the value as `DB_PASSWORD` at container runtime
+![ALB Monitoring](printscreens/alb_monitoring.png)
 
-> **Lesson learned:** Secrets Manager has a 30 day recovery window by default. After `terraform destroy`, the secret is scheduled for deletion but not immediately deleted. Running `terraform apply` again fails because the name is taken. For portfolio projects where you destroy and recreate frequently, setting `recovery_window_in_days = 0` deletes the secret immediately on destroy. In production, keep the 30 day window as a safety net against accidental deletion.
+Health check logs are stored in S3. The `ELBHealthCheckLogTestFile` confirms the S3 bucket policy is correctly configured and the ALB has write permission to the bucket:
 
-> **Lesson learned:** Originally the RDS module fetched the password using a `data.aws_secretsmanager_secret_version` data source. This caused a race condition — Terraform tried to read the secret in the same apply that created it, and sometimes the secret wasn't fully propagated before RDS tried to fetch it. The fix was to remove the data source entirely and pass the password directly from the secrets module output through `infra/main.tf`. This eliminates the timing issue because Terraform's dependency graph guarantees the password value exists before RDS is created.
+![S3 Health Check Logs](printscreens/bucket_health_check_log.png)
 
 ---
 
-### modules/rds/
+## Secrets Management
 
-| Resource | Purpose | Connects To |
-|----------|---------|-------------|
-| `aws_db_subnet_group` | Defines which subnets RDS can use (isolated only) | RDS instance |
-| `aws_db_instance` | PostgreSQL 16 Multi-AZ database | ECS via endpoint |
+One of the main security concerns in any application that connects to a database is how the password gets from where it is generated to where it is used without ever being hardcoded anywhere. This project handles it by generating the password with Terraform's `random_password` resource, storing it in AWS Secrets Manager, and having each consumer fetch it in the way that makes most sense for their context.
 
-**Key configuration:**
+The password is generated with `override_special = "!#$%&*()-_=+[]{}?"` to exclude characters that RDS doesn't accept — specifically `/`, `@`, `"`, and spaces. This was discovered through a failed apply that returned an `InvalidParameterValue` error when the password contained an `@` character.
 
-| Setting | Value | Reason |
-|---------|-------|--------|
-| `multi_az` | `true` | Standby in second AZ, automatic failover |
-| `storage_encrypted` | `true` | Data encrypted at rest |
-| `publicly_accessible` | `false` | No internet access |
-| `storage_type` | `gp3` | Newer, faster, cheaper than gp2 |
-| `backup_retention_period` | `7` | 7 days of automated backups |
-| `skip_final_snapshot` | `true` | Portfolio — set to `false` in production |
-| `deletion_protection` | `false` | Portfolio — set to `true` in production |
+RDS receives the password directly as a module output at apply time — Terraform passes it as a variable. This is safe because Terraform marks it as sensitive, meaning it never appears in plan output or logs.
 
-> **Lesson learned:** `aws_db_instance` has two similar attributes — `endpoint` returns `host:port` as a combined string, while `address` returns only the hostname. Using `endpoint` as `DB_HOST` caused a DNS resolution error because the port was being included in the hostname. Always use `address` when you need just the host.
+ECS receives only the ARN of the secret. When a Fargate task starts, the ECS agent uses the execution role to call Secrets Manager and inject the value as an environment variable inside the container. The application code reads it with `os.environ["DB_PASSWORD"]`. The password never appears in the task definition, never appears in CloudWatch logs, and is never visible to anyone with ECS console access.
 
 ---
 
-### modules/alb/
+## RDS PostgreSQL Multi-AZ
 
-| Resource | Purpose | Connects To |
-|----------|---------|-------------|
-| `random_id` | Generates unique suffix for S3 bucket name | S3 bucket |
-| `aws_s3_bucket` | Stores ALB health check logs | ALB via `health_check_logs` block |
-| `aws_s3_bucket_policy` | Grants ALB permission to write logs to S3 | S3 bucket |
-| `aws_lb` | Application Load Balancer in public subnets | Listener, ALB security group |
-| `aws_lb_target_group` | Pool of ECS task IPs on port 5000, runs health checks | ALB listener, ECS service |
-| `aws_lb_listener` | Listens on port 80, forwards to target group | ALB, target group |
+The database runs in isolated subnets with Multi-AZ enabled. AWS maintains a synchronous standby replica in a second availability zone. If the primary fails, AWS automatically promotes the standby — the application reconnects to the same endpoint and continues working. This happens without any Terraform or manual intervention.
 
-**How the three ALB resources connect:**
+The storage uses `gp3` rather than the older `gp2` — newer, faster, and cheaper. Encryption is enabled at rest. Automated backups are retained for 7 days. The deletion protection and final snapshot settings are set for portfolio use — in production both would be reversed.
 
-```
-aws_lb                → the load balancer (no references to others)
-aws_lb_target_group   → pool of destinations (references vpc_id only)
-aws_lb_listener       → the glue (references both ALB and target group)
-aws_ecs_service       → registers task IPs into target group at runtime
-```
+![RDS Configuration](printscreens/db_config.png)
 
-The listener is the only resource that connects the ALB to the target group. The target group itself starts empty — the ECS service registers task IPs into it when tasks start and deregisters them when tasks stop. The ALB is completely unaware of this process — it just sees healthy IPs appear and disappear in the pool.
+The connectivity tab confirms the database has no internet access gateway and IAM authentication is disabled — only password authentication via the ECS security group is permitted:
 
-**Health check:**
-- Path: `/health` — dedicated lightweight endpoint that always returns 200
-- Interval: 35 seconds / Timeout: 5 seconds
-- Healthy threshold: 3 / Unhealthy threshold: 3
+![RDS Connectivity](printscreens/db_connectivity_security.png)
 
-`target_type = "ip"` is required because Fargate tasks are addressed by private IP, not EC2 instance ID.
+RDS monitoring shows database connections and disk activity increasing during the stress test, confirming the full three-tier chain is working end to end:
+
+![RDS Monitoring](printscreens/db_monitorting2.png)
 
 ---
 
-### modules/ecs/
+## ECS Fargate
 
-**`main.tf`**
+Fargate is AWS's serverless container runtime. Instead of provisioning EC2 instances and installing Docker, you define what the container needs — CPU, memory, image, environment variables — and AWS places it and runs it. There are no instances to patch, no capacity to plan, and no ECS agent to manage.
 
-| Resource | Purpose | Connects To |
-|----------|---------|-------------|
-| `aws_ecs_cluster` | Logical grouping for tasks and services | ECS service |
-| `aws_cloudwatch_log_group` | Receives container logs at `/ecs/app` | Task definition log config |
-| `aws_ecs_task_definition` | Blueprint: image, CPU, memory, env vars, secrets, ports | ECS service |
-| `aws_ecs_service` | Keeps 2 tasks running, registers IPs into ALB target group | Cluster, task definition, ALB, networking |
-| `aws_appautoscaling_target` | Registers ECS service as an auto scalable resource | Auto scaling policy |
-| `aws_appautoscaling_policy` | Scales tasks out when CPU > 60%, in when CPU drops | Auto scaling target |
+The task definition is the blueprint. It defines the container image from ECR, 256 CPU units (0.25 vCPU), 512 MB of memory, the port mapping on port 5000, the environment variables for the database connection, the secret ARN for the password, and the CloudWatch log configuration. Every time the task definition is updated, AWS creates a new revision. The service can be updated to point to the new revision with zero downtime using a rolling deployment.
 
-**How auto scaling connects to the rest of the architecture:**
+The service is what keeps tasks running. It maintains a desired count of 2 tasks at all times. If a task crashes, the service starts a replacement. If a task fails health checks, the ALB stops sending traffic to it and the service eventually replaces it. When a task starts, the service registers its IP into the ALB target group. When it stops, it deregisters.
 
-```
-aws_appautoscaling_target
-  → resource_id = "service/ecs-docker-cluster/app-service"
-  → registers this specific ECS service as scalable
+Two IAM roles are attached to the task definition. The execution role is used by the ECS agent to pull the image from ECR, fetch the secret from Secrets Manager, and write logs to CloudWatch. The task role is used by the application code itself at runtime. Separating them follows least-privilege — the application doesn't need to pull ECR images, and the ECS agent doesn't need to call whatever AWS services the application might call.
 
-aws_appautoscaling_policy
-  → references target via resource_id, scalable_dimension, service_namespace
-  → watches ECSServiceAverageCPUUtilization metric
-  → when CPU > 60%: increases aws_ecs_service desired_count
-  → new tasks start → register their IPs into ALB target group automatically
-  → ALB starts sending traffic to new tasks with no configuration changes
-```
+2 tasks running on task definition `app:3`, both in `Running` state:
 
-The auto scaling target and policy live in the ECS module because they directly reference the ECS cluster and service names. The ALB is completely unaware of scaling — it just sees more healthy task IPs appear in the target group pool.
+![ECS Tasks](printscreens/ecs_tasks.png)
 
-**Auto scaling configuration:**
+Normal operating state — 2 healthy targets, CPU at ~4%, memory at ~4.3%:
 
-| Setting | Value | Purpose |
-|---------|-------|---------|
-| `min_capacity` | 2 | Always keep at least 2 tasks for HA |
-| `max_capacity` | 4 | Never exceed 4 tasks |
-| `target_value` | 60% CPU | Scale out above, scale in below |
-| `scale_out_cooldown` | 60s | Wait before adding more tasks |
-| `scale_in_cooldown` | 60s | Wait before removing tasks |
-
-**Container configuration:**
-
-| Setting | Value | Purpose |
-|---------|-------|---------|
-| `image` | ECR URL`:v1` | Which container to run |
-| `cpu / memory` | 256 / 512 | 0.25 vCPU, 512MB RAM |
-| `essential` | `true` | Restart entire task if container crashes |
-| `containerPort` | 5000 | Exposes Flask port to task network interface |
-| `environment` | DB_HOST, DB_NAME, DB_USER, DB_PORT | Non-sensitive config as plain text |
-| `secrets` | DB_PASSWORD from Secrets Manager ARN | Password injected securely at runtime |
-| `logConfiguration` | awslogs → `/ecs/app` | Ships stdout/stderr to CloudWatch |
-
-**`iam.tf`**
-
-| Resource | Purpose |
-|----------|---------|
-| `aws_iam_role.execution` | Used by ECS to pull image from ECR, fetch secrets, write logs |
-| `aws_iam_role.task` | Used by app code at runtime (currently minimal permissions) |
-| `aws_iam_role_policy_attachment.execution` | Attaches `AmazonECSTaskExecutionRolePolicy` (ECR + CloudWatch) |
-| `aws_iam_role_policy.secrets` | Grants `secretsmanager:GetSecretValue` on the specific secret ARN |
-
-```
-Execution role → ECS infrastructure (pull image, fetch secrets, write logs)
-Task role      → Application code permissions (what Flask can call in AWS)
-```
+![ECS Low CPU](printscreens/ecs_low_cpu_utilization.png)
 
 ---
 
-## Full Connection Map
+## Auto Scaling Under Load
 
-```
-module.secrets
-  ├── db_password ─────────────────────────────► module.rds password (apply time)
-  └── rds_secret_arn ──────────────────────────► module.ecs secrets valueFrom (runtime)
+Auto scaling is configured with `aws_appautoscaling_target` and `aws_appautoscaling_policy` using target tracking. The policy watches `ECSServiceAverageCPUUtilization` and tries to maintain it at 60%. When CPU rises above 60%, it adds tasks up to the maximum of 4. When CPU drops below 60%, it removes tasks down to the minimum of 2. Both directions have a 60 second cooldown to prevent thrashing.
 
-module.networking
-  ├── vpc_id ──────────────────────────────────► alb target group vpc_id
-  ├── public_subnets_id ───────────────────────► aws_lb subnets
-  ├── private_subnets_id ──────────────────────► aws_ecs_service network_configuration
-  ├── isolated_subnets_id ─────────────────────► aws_db_subnet_group subnet_ids
-  ├── alb_sg_id ───────────────────────────────► aws_lb security_groups
-  ├── ecs_sg_id ───────────────────────────────► aws_ecs_service security_groups
-  └── rds_sg_id ───────────────────────────────► aws_db_instance vpc_security_group_ids
+To actually trigger auto scaling, a `/stress` endpoint was added to the Flask app that performs 1 million CPU-intensive calculations per request. A load test using Apache Benchmark (`ab`) sends 5000 requests with 50 concurrent connections to this endpoint. This generates enough sustained CPU pressure to push past the 60% threshold and trigger the scaling policy.
 
-module.ecr
-  └── repository_url ──────────────────────────► aws_ecs_task_definition image
+### Stress Test — CPU Spike
 
-module.rds
-  └── db_endpoint (address only) ──────────────► ecs DB_HOST environment variable
+CPU maximum hits 100%, average climbs above 60%, auto scaling triggers and a third task deployment begins. The service shows 3 Completed tasks in the deployment state:
 
-module.alb
-  └── target_group_arn ────────────────────────► aws_ecs_service load_balancer block
+![Stress Beginning](printscreens/stress_beginning.png)
 
-aws_ecs_service (runtime)
-  └── registers task IPs ──────────────────────► ALB target group pool
-```
+### Stress Test — Third Task Healthy
+
+3 healthy targets are registered in the ALB target group. The CPU spike is still visible, confirming the new task came up while load was still running and immediately started receiving traffic:
+
+![Stress 3 Healthy](printscreens/stress_3healthy.png)
+
+### Full Stress Cycle
+
+Two complete stress test runs captured — CPU spikes to 100% maximum, the average climbs above 50%, then drops back to 0% when the test ends. The memory minimum line dips during scaling events as new tasks are provisioned and old ones drain:
+
+![Stress Full Cycle](printscreens/stress.png)
+
+---
+
+## Automated Docker Image Push
+
+One of the problems with any IaC project that involves containers is the chicken-and-egg issue — ECS needs an image in ECR before it can start tasks, but the ECR repository doesn't exist until Terraform creates it. The standard approach is to run `terraform apply` first for ECR, then push the image manually, then run `terraform apply` again for everything else.
+
+This project solves it with a `terraform_data` resource in the ECR module that runs a `local-exec` provisioner. When Terraform creates the ECR repository, this resource immediately runs three shell commands — authenticate Docker to ECR, build the image from the `app/` directory, and push it with the specified tag. By the time ECS tries to pull the image, it already exists. One `terraform apply` deploys everything.
+
+---
+
+## Lessons Learned
+
+**Secrets Manager recovery window** — After `terraform destroy`, the secret is not immediately deleted. Secrets Manager schedules it for deletion with a 30 day recovery window. Running `terraform apply` again immediately fails because the name is taken. For portfolio projects where you destroy and recreate frequently, setting `recovery_window_in_days = 0` avoids this. In production, keep the 30 day window as protection against accidental deletion.
+
+**RDS password race condition** — The original design had the RDS module read the password from Secrets Manager using a `data.aws_secretsmanager_secret_version` data source. This caused intermittent failures where Terraform tried to read the secret version in the same apply that created it, before it was fully propagated. The fix was to remove the data source entirely and pass the password directly from the secrets module output as a variable. Terraform's dependency graph guarantees the password value is available before the RDS resource is created.
+
+**Security group circular dependency** — Writing security groups with inline ingress/egress blocks where ALB references ECS, ECS references ALB and RDS, and RDS references ECS causes a cycle error — Terraform cannot determine which resource to create first. The fix is to create empty security groups first using separate `aws_security_group` resources, then attach rules using individual `aws_security_group_rule` resources that reference the already-created groups.
+
+**RDS endpoint vs address** — `aws_db_instance.endpoint` returns `host:port` as a combined string like `postgres.xxx.us-east-1.rds.amazonaws.com:5432`. Using this directly as `DB_HOST` caused a DNS resolution error because the port was included in the hostname. The fix is to use `aws_db_instance.address` which returns only the hostname.
 
 ---
 
@@ -306,21 +281,24 @@ aws_ecs_service (runtime)
 ## Deployment
 
 ### Prerequisites
-- AWS CLI configured
+- AWS CLI configured with appropriate credentials
 - Terraform >= 1.7
 - Docker installed and running
 
-### Deploy
+### 1. Bootstrap — run once, manually
 
 ```bash
-# 1. Create remote state infrastructure
 cd bootstrap
 terraform init
 terraform apply
+```
 
-# 2. Deploy all infrastructure
-# Docker image is built and pushed automatically via terraform_data
-cd ../infra
+### 2. Deploy all infrastructure
+
+The Docker image is built and pushed to ECR automatically as part of this step.
+
+```bash
+cd infra
 terraform init
 terraform apply
 ```
@@ -342,7 +320,7 @@ sudo apt install -y apache2-utils
 ab -n 5000 -c 50 http://<alb_dns_name>/stress
 ```
 
-Watch tasks scale in: AWS Console → ECS → Clusters → ecs-docker-cluster → Tasks
+Watch tasks scale: AWS Console → ECS → Clusters → ecs-docker-cluster → Tasks
 
 ### Destroy
 
@@ -353,6 +331,8 @@ terraform destroy
 ---
 
 ## Production Considerations
+
+This project is designed as a portfolio demonstration. The following changes would be made for a production deployment:
 
 | Setting | This Project | Production |
 |---------|-------------|------------|
@@ -380,3 +360,9 @@ terraform destroy
 | **Total** | **~$0.10/hr (~$2.40/day)** |
 
 > Destroy resources after testing to avoid unnecessary charges.
+
+---
+
+## Intended Audience
+
+This project is intended to demonstrate containerized infrastructure and cloud networking capabilities for roles such as Cloud Engineer, DevOps Engineer, or Platform Engineer. It shows the ability to design a multi-tier network with proper isolation, deploy containerized workloads on managed compute, manage secrets securely without hardcoding credentials, configure auto scaling based on real metrics, and build production-pattern infrastructure entirely from code.
