@@ -155,7 +155,7 @@ The target group is where the connection between the ALB and ECS happens. When E
 
 The target group uses `target_type = "ip"` rather than the default `instance` because Fargate tasks don't run on EC2 instances. They have no instance ID — they only have a private IP address assigned when the task starts.
 
-![ALB Network Mapping](printscreens/loadbalancer mapping.pn)
+![ALB Network Mapping](printscreens/loadbalancer mapping.png)
 
 ![ALB Listeners](printscreens/alb_listeners.png)
 
