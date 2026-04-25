@@ -227,15 +227,9 @@ Auto scaling is configured with `aws_appautoscaling_target` and `aws_appautoscal
 
 To actually trigger auto scaling, a `/stress` endpoint was added to the Flask app that performs 1 million CPU-intensive calculations per request. A load test using Apache Benchmark (`ab`) sends 5000 requests with 50 concurrent connections to this endpoint. This generates enough sustained CPU pressure to push past the 60% threshold and trigger the scaling policy.
 
-### Stress Test — CPU Spike
+### Stress Test — CPU Spike and Task Addition
 
-CPU maximum hits 100%, average climbs above 60%, auto scaling triggers and a third task deployment begins. The service shows 3 Completed tasks in the deployment state:
-
-![Stress Beginning](printscreens/stress_beginning.png)
-
-### Stress Test — Third Task Healthy
-
-3 healthy targets are registered in the ALB target group. The CPU spike is still visible, confirming the new task came up while load was still running and immediately started receiving traffic:
+CPU maximum hits 100%, average climbs above 60%, auto scaling triggers and a third task deployment begins. 3 healthy targets are registered in the ALB target group. The CPU spike is still visible, confirming the new task came up while load was still running and immediately started receiving traffic: 
 
 ![Stress 3 Healthy](printscreens/stress_3healthy.png)
 
@@ -257,13 +251,11 @@ This project solves it with a `terraform_data` resource in the ECR module that r
 
 ## Lessons Learned
 
-**Secrets Manager recovery window** — After `terraform destroy`, the secret is not immediately deleted. Secrets Manager schedules it for deletion with a 30 day recovery window. Running `terraform apply` again immediately fails because the name is taken. For portfolio projects where you destroy and recreate frequently, setting `recovery_window_in_days = 0` avoids this. In production, keep the 30 day window as protection against accidental deletion.
+**Secrets Manager recovery window** — After `terraform destroy`, the secret is not immediately deleted. Secrets Manager schedules it for deletion with a 30 day recovery window. Running `terraform apply` again immediately fails because the name is taken. For portfolio projects where you destroy and recreate frequently, setting `recovery_window_in_days = 0` avoids this. In production, I would keep the 30 day window as protection against accidental deletion.
 
-**RDS password race condition** — The original design had the RDS module read the password from Secrets Manager using a `data.aws_secretsmanager_secret_version` data source. This caused intermittent failures where Terraform tried to read the secret version in the same apply that created it, before it was fully propagated. The fix was to remove the data source entirely and pass the password directly from the secrets module output as a variable. Terraform's dependency graph guarantees the password value is available before the RDS resource is created.
+**RDS password race condition** — I originally designed the RDS module read the password from Secrets Manager using a `data.aws_secretsmanager_secret_version` data source. This caused intermittent failures where Terraform tried to read the secret version in the same apply that created it, before it was fully propagated. The fix was to remove the data source entirely and pass the password directly from the secrets module output as a variable. Terraform's dependency graph guarantees the password value is available before the RDS resource is created.
 
 **Security group circular dependency** — Writing security groups with inline ingress/egress blocks where ALB references ECS, ECS references ALB and RDS, and RDS references ECS causes a cycle error — Terraform cannot determine which resource to create first. The fix is to create empty security groups first using separate `aws_security_group` resources, then attach rules using individual `aws_security_group_rule` resources that reference the already-created groups.
-
-**RDS endpoint vs address** — `aws_db_instance.endpoint` returns `host:port` as a combined string like `postgres.xxx.us-east-1.rds.amazonaws.com:5432`. Using this directly as `DB_HOST` caused a DNS resolution error because the port was included in the hostname. The fix is to use `aws_db_instance.address` which returns only the hostname.
 
 ---
 
